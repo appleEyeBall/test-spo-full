@@ -1,0 +1,3 @@
+cryptography==2.8
+adal==1.2.2
+requests==2.22.0

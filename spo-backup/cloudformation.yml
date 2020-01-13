@@ -1,0 +1,170 @@
+Transform: AWS::Serverless-2016-10-31
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Sharepoint_backup lambda'
+Parameters:
+  paramBucketSharepoint:
+    Description: The name of the bucket to store CSV file
+    Type: String
+    Default: bucket-name
+  paramRecipient:
+    Description: The Email address that gets notifications as well as logs
+    Type: String
+  paramCcRecipient:
+    Type: String
+    Description: The second email address that gets notifications
+  paramSharepointBackupSecret:
+    Type: String
+    Description: (cert_key;client_id;secret;password;tenant_id;thumbprint;user_id;username. For sharepoint purge, backup) separated by ';'
+
+Resources: 
+  spoRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action: 
+              - s3:PutObject
+              Resource: "*"
+            - Effect: Allow
+              Action:
+              - sns:*
+              Resource: "*"
+            - Effect: Allow
+              Action:
+              - cloudwatch:PutMetricData
+              - ds:CreateComputer
+              - ds:DescribeDirectories
+              - ec2:DescribeInstanceStatus
+              - logs:*
+              - ssm:*
+              - ec2messages:*
+              Resource: "*"
+            - Effect: Allow
+              Action: iam:CreateServiceLinkedRole
+              Resource: arn:aws:iam::*:role/aws-service-role/ssm.amazonaws.com/AWSServiceRoleForAmazonSSM*
+              Condition:
+                StringLike:
+                  iam:AWSServiceName: ssm.amazonaws.com
+            - Effect: Allow
+              Action:
+              - iam:DeleteServiceLinkedRole
+              - iam:GetServiceLinkedRoleDeletionStatus
+              Resource: arn:aws:iam::*:role/aws-service-role/ssm.amazonaws.com/AWSServiceRoleForAmazonSSM*
+            - Effect: Allow
+              Action:
+              - ssmmessages:CreateControlChannel
+              - ssmmessages:CreateDataChannel
+              - ssmmessages:OpenControlChannel
+              - ssmmessages:OpenDataChannel
+              Resource: "*"
+
+            - Effect: Allow
+              Action:
+              - secretsmanager:*
+              - cloudformation:CreateChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:DescribeStackResource
+              - cloudformation:DescribeStacks
+              - cloudformation:ExecuteChangeSet
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeSubnets
+              - ec2:DescribeVpcs
+              - kms:DescribeKey
+              - kms:ListAliases
+              - kms:ListKeys
+              - lambda:ListFunctions
+              - rds:DescribeDBClusters
+              - rds:DescribeDBInstances
+              - tag:GetResources
+              Resource: "*"
+            - Effect: Allow
+              Action:
+              - lambda:AddPermission
+              - lambda:CreateFunction
+              - lambda:GetFunction
+              - lambda:InvokeFunction
+              - lambda:UpdateFunctionConfiguration
+              Resource: arn:aws:lambda:*:*:function:SecretsManager*
+            - Effect: Allow
+              Action:
+              - serverlessrepo:CreateCloudFormationChangeSet
+              Resource: arn:aws:serverlessrepo:*:*:applications/SecretsManager*
+            - Effect: Allow
+              Action:
+              - s3:GetObject
+              Resource: arn:aws:s3:::awsserverlessrepo-changesets*
+
+
+  SNSTopic: 
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: Sharepoint Backup Fail
+      TopicName: backupFailTopic
+      Subscription:
+      - Endpoint: !Sub ${paramRecipient}
+        Protocol: email
+    
+  SharepointBackup:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        S3Bucket: "oluwatise-test-bucket"
+        S3Key: "SPOBackup.zip"
+      Description: Converts SPO list to CSV
+      FunctionName: SharepointBackup
+      Handler: index.handler
+      Role: !GetAtt spoRole.Arn
+      Runtime: python3.6
+      Timeout: 400
+      DeadLetterConfig:
+        TargetArn: !Ref SNSTopic
+      Environment:
+        Variables:
+          bucketSharepoint: !Sub ${paramBucketSharepoint}
+          recipient: !Sub ${paramRecipient}
+          ccRecipient: !Sub ${paramCcRecipient}
+
+  CloudwatchSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: How often to backup
+      Name: sharepoint_backup_weekly
+      ScheduleExpression: cron(0 6 ? * 1 *)
+      State: ENABLED
+      Targets: 
+      - Arn: !GetAtt SharepointBackup.Arn
+        Id: "functionInvoke"
+
+  InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName:
+        Ref: SharepointBackup
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CloudwatchSchedule.Arn
+
+
+
+  s3csvbucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      BucketName: !Sub ${paramBucketSharepoint}
+  Secrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: (cert_key;client_id;secret;password;tenant_id;thumbprint;user_id;username. For sharepoint backup) separated by ';'
+      Name: sharepoint_backup_secret
+      SecretString: !Sub ${paramSharepointBackupSecret}
